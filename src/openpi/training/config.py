@@ -26,6 +26,7 @@ import openpi.shared.normalize as _normalize
 import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
+import openpi.training.misc.sim_improvement_config as sim_improvement_config
 
 ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
@@ -450,6 +451,15 @@ class TrainConfig:
     # If true, will enable wandb logging.
     wandb_enabled: bool = True
 
+    # Whether to save full training state (optimizer, etc.) in checkpoints.
+    save_train_state: bool = True
+    # Remote checkpoint directory for uploading (e.g., s3:// path).
+    remote_checkpoint_dir: str | None = None
+    # PyTorch weight path for fine-tuning from a PyTorch checkpoint.
+    pytorch_weight_path: str | None = None
+    # PyTorch training precision.
+    pytorch_training_precision: str = "bfloat16"
+
     # Used to pass metadata to the policy server.
     policy_metadata: dict[str, Any] | None = None
 
@@ -819,6 +829,8 @@ _CONFIGS = [
         wandb_enabled=False,
     ),
 ]
+
+_CONFIGS.extend(sim_improvement_config.get_sim_improvement_configs())
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")

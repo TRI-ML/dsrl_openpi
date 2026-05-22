@@ -109,9 +109,12 @@ class Observation(Generic[ArrayT]):
         if ("tokenized_prompt" in data) != ("tokenized_prompt_mask" in data):
             raise ValueError("tokenized_prompt and tokenized_prompt_mask must be provided together.")
         # If images are uint8, convert them to [-1, 1] float32.
+        import torch
         for key in data["image"]:
             if data["image"][key].dtype == np.uint8:
                 data["image"][key] = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
+            elif hasattr(data["image"][key], "dtype") and data["image"][key].dtype == torch.uint8:
+                data["image"][key] = data["image"][key].to(torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
         return cls(
             images=data["image"],
             image_masks=data["image_mask"],
@@ -245,6 +248,15 @@ class BaseModelConfig(abc.ABC):
     def fake_act(self, batch_size: int = 1) -> Actions:
         _, action_spec = self.inputs_spec(batch_size=batch_size)
         return jax.tree.map(lambda x: jnp.ones(x.shape, x.dtype), action_spec)
+
+    def load_pytorch(self, train_config, weight_path: str):
+        """Load a PyTorch checkpoint (model.safetensors) into PI0Pytorch."""
+        import safetensors.torch
+        from openpi.models_pytorch import pi0_pytorch
+        logger.info(f"Loading PyTorch model from {weight_path}")
+        model = pi0_pytorch.PI0Pytorch(config=train_config.model)
+        safetensors.torch.load_model(model, weight_path)
+        return model
 
 
 @dataclasses.dataclass
