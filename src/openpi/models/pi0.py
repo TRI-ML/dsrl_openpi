@@ -1,3 +1,4 @@
+import functools
 import logging
 
 import einops
@@ -14,6 +15,27 @@ import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
 
 logger = logging.getLogger("openpi")
+
+
+def get_prefix_weights(start: int, end: int, total: int, schedule: str) -> jnp.ndarray:
+    """Soft mask over chunk steps for RTC prefix guidance (verbatim from
+    Physical-Intelligence/real-time-chunking-kinetix model.py get_prefix_weights).
+
+    With start=2, end=6, total=10 -> [1, 1, 4/5, 3/5, 2/5, 1/5, 0, 0, 0, 0]. `start` (=inference_delay,
+    inclusive) is where the chunk may begin to change; `end` (=prefix_attention_horizon, exclusive) is
+    where it stops attending to the prefix. `end` takes precedence: if end<start, start clamps to end."""
+    start = jnp.minimum(start, end)
+    if schedule == "ones":
+        w = jnp.ones(total)
+    elif schedule == "zeros":
+        w = (jnp.arange(total) < start).astype(jnp.float32)
+    elif schedule in ("linear", "exp"):
+        w = jnp.clip((start - 1 - jnp.arange(total)) / (end - start + 1) + 1, 0, 1)
+        if schedule == "exp":
+            w = w * jnp.expm1(w) / (jnp.e - 1)
+    else:
+        raise ValueError(f"Invalid prefix_attention_schedule: {schedule}")
+    return jnp.where(jnp.arange(total) >= end, 0, w)
 
 
 def make_attn_mask(input_mask, mask_ar):
@@ -236,28 +258,34 @@ class Pi0(_model.BaseModel):
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
 
+        velocity = self._make_velocity_fn(observation, prefix_tokens, prefix_mask, kv_cache, batch_size)
+
         def step(carry):
             x_t, time = carry
-            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
-                observation, x_t, jnp.broadcast_to(time, batch_size)
-            )
-            # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
-            # other
-            suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
-            # `prefix_attn_mask` is shape (b, suffix_len, prefix_len) indicating how the suffix tokens can attend to the
-            # prefix tokens
-            prefix_attn_mask = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
-            # `combined_mask` is shape (b, suffix_len, prefix_len + suffix_len) indicating how the suffix tokens (which
-            # generate the queries) can attend to the full prefix + suffix sequence (which generates the keys and values)
-            full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
-            assert full_attn_mask.shape == (
-                batch_size,
-                suffix_tokens.shape[1],
-                prefix_tokens.shape[1] + suffix_tokens.shape[1],
-            )
-            # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
-            positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+            v_t = velocity(x_t, jnp.broadcast_to(time, batch_size))
+            return x_t + dt * v_t, time + dt
 
+        def cond(carry):
+            x_t, time = carry
+            # robust to floating-point error
+            return time >= -dt / 2
+
+        x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
+        return x_0
+
+    def _make_velocity_fn(self, observation, prefix_tokens, prefix_mask, kv_cache, batch_size):
+        """Return v(x_t, time_b) -> flow velocity for the action suffix, reusing the prefill KV cache.
+        Factored out of the sampler loop so both the plain sampler and the RTC guided sampler
+        (sample_actions_rtc) share ONE forward-pass implementation. time_b is shape (batch,)."""
+
+        def velocity(x_t, time_b):
+            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
+                observation, x_t, time_b
+            )
+            suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+            prefix_attn_mask = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
+            full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
+            positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
             (prefix_out, suffix_out), _ = self.PaliGemma.llm(
                 [None, suffix_tokens],
                 mask=full_attn_mask,
@@ -266,13 +294,78 @@ class Pi0(_model.BaseModel):
                 adarms_cond=[None, adarms_cond],
             )
             assert prefix_out is None
-            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+            return self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
+        return velocity
+
+    def sample_actions_rtc(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        prev_action_chunk: at.Float[at.Array, "b ah ad"],
+        *,
+        num_steps: int | at.Int[at.Array, ""] = 10,
+        inference_delay: int = 1,
+        prefix_attention_horizon: int = 4,
+        prefix_attention_schedule: str = "exp",
+        max_guidance_weight: float = 10.0,
+        noise: at.Float[at.Array, "b ah ad"] | None = None,
+    ) -> _model.Actions:
+        """Real-Time Chunking (Physical-Intelligence/real-time-chunking-kinetix, arXiv 2506.07339).
+
+        Guides the flow denoising so the new chunk's PREFIX (the actions that will still be executing
+        during inference latency) stays consistent with `prev_action_chunk`, giving smooth
+        chunk-to-chunk transitions. Ported from kinetix model.py realtime_action + get_prefix_weights.
+
+        NOTE on time convention: kinetix uses t=0 noise -> t=1 target (dt=+1/n); THIS pi0 uses the
+        opposite, t=1 noise -> t=0 target (dt=-1/n), with training target u_t = noise - actions, so
+        the clean-sample estimate is x1 = x_t - t*v_t and the guidance sign is flipped accordingly.
+        `prev_action_chunk` is aligned to THIS chunk's time axis (already shifted by executed steps)."""
+        observation = _model.preprocess_observation(None, observation, train=False)
+        dt = -1.0 / num_steps
+        batch_size = observation.state.shape[0]
+        if noise is None:
+            noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
+
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        velocity = self._make_velocity_fn(observation, prefix_tokens, prefix_mask, kv_cache, batch_size)
+
+        # soft mask over chunk steps: full weight on the frozen prefix, exp-decaying to 0 (kinetix).
+        weights = get_prefix_weights(
+            inference_delay, prefix_attention_horizon, self.action_horizon, prefix_attention_schedule
+        )  # (ah,)
+
+        def guided_velocity(x_t, time_scalar):
+            time_b = jnp.broadcast_to(time_scalar, batch_size)
+
+            def denoiser(x):
+                v = velocity(x, time_b)
+                # clean-sample estimate for THIS convention (t=1 noise -> t=0 target, u=noise-action):
+                # x_t = t*noise + (1-t)*action  =>  action_hat = x_t - t*v
+                x1 = x - time_scalar * v
+                return x1, v
+
+            x1, vjp_fun, v_t = jax.vjp(denoiser, x_t, has_aux=True)
+            error = (prev_action_chunk - x1) * weights[None, :, None]  # (b, ah, ad)
+            pinv_correction = vjp_fun((error, jnp.zeros_like(v_t)))[0]
+            # guidance scalars in THIS time convention (t: 1 noise -> 0 target). At t->1 (noise)
+            # guidance is ~0; it ramps up toward t->0 (clean), clipped to max_guidance_weight.
+            inv_r2 = (time_scalar**2 + (1 - time_scalar) ** 2) / (time_scalar**2 + 1e-8)
+            c = jnp.nan_to_num(time_scalar / (1 - time_scalar), posinf=max_guidance_weight)
+            guidance_weight = jnp.minimum(c * inv_r2, max_guidance_weight)
+            # x1 = x - t*v, so dx1/dv < 0 → moving toward `error` means SUBTRACTING the correction.
+            return v_t - guidance_weight * pinv_correction
+
+        def step(carry):
+            x_t, time = carry
+            v_t = guided_velocity(x_t, time)
             return x_t + dt * v_t, time + dt
 
         def cond(carry):
             x_t, time = carry
-            # robust to floating-point error
             return time >= -dt / 2
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
