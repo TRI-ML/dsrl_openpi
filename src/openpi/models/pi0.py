@@ -309,13 +309,20 @@ class Pi0(_model.BaseModel):
         prefix_attention_horizon: int = 4,
         prefix_attention_schedule: str = "exp",
         max_guidance_weight: float = 10.0,
+        sigma: float = 0.2,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
     ) -> _model.Actions:
-        """Real-Time Chunking (Physical-Intelligence/real-time-chunking-kinetix, arXiv 2506.07339).
+        """Real-Time Chunking (Physical-Intelligence/real-time-chunking-kinetix, arXiv 2506.07339),
+        with the observation-conditioned-prior tweak from alexander-soare's "smooth as butter" post.
 
         Guides the flow denoising so the new chunk's PREFIX (the actions that will still be executing
         during inference latency) stays consistent with `prev_action_chunk`, giving smooth
         chunk-to-chunk transitions. Ported from kinetix model.py realtime_action + get_prefix_weights.
+
+        `sigma` = the observation-CONDITIONED action prior std (σ_{d|o}). Vanilla RTC assumes σ_d=1;
+        the blog's finding is that for a policy the conditioned prior is much NARROWER (~0.2), which
+        warrants stronger guidance. σ enters r_τ² (the guidance denominator): smaller σ → stronger
+        pull toward the prefix. sigma=1.0 recovers vanilla RTC exactly.
 
         NOTE on time convention: kinetix uses t=0 noise -> t=1 target (dt=+1/n); THIS pi0 uses the
         opposite, t=1 noise -> t=0 target (dt=-1/n), with training target u_t = noise - actions, so
@@ -350,10 +357,14 @@ class Pi0(_model.BaseModel):
 
             x1, vjp_fun, v_t = jax.vjp(denoiser, x_t, has_aux=True)
             error = (prev_action_chunk - x1) * weights[None, :, None]  # (b, ah, ad)
-            pinv_correction = vjp_fun((error, jnp.zeros_like(v_t)))[0]
+            # has_aux=True → vjp is taken w.r.t. the PRIMAL (x1) only; cotangent matches x1's tree.
+            pinv_correction = vjp_fun(error)[0]
             # guidance scalars in THIS time convention (t: 1 noise -> 0 target). At t->1 (noise)
             # guidance is ~0; it ramps up toward t->0 (clean), clipped to max_guidance_weight.
-            inv_r2 = (time_scalar**2 + (1 - time_scalar) ** 2) / (time_scalar**2 + 1e-8)
+            # Generalized r_τ² keeps the observation-conditioned prior std σ (blog's tweak): our t=1-τ,
+            # so inv_r2 = (t² + σ²(1-t)²)/(σ²t²). σ=1 → vanilla RTC; σ<1 → stronger pull.
+            s2 = sigma * sigma
+            inv_r2 = (time_scalar**2 + s2 * (1 - time_scalar) ** 2) / (s2 * time_scalar**2 + 1e-8)
             c = jnp.nan_to_num(time_scalar / (1 - time_scalar), posinf=max_guidance_weight)
             guidance_weight = jnp.minimum(c * inv_r2, max_guidance_weight)
             # x1 = x - t*v, so dx1/dv < 0 → moving toward `error` means SUBTRACTING the correction.

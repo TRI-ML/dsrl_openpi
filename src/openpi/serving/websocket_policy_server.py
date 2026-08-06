@@ -60,14 +60,21 @@ class WebsocketPolicyServer:
                 # {"method": "infer", "obs": {...}} (+ optional "noise"); older
                 # servers expected the bare obs dict. Unwrap for compatibility so
                 # both the eval client and deployment/openpi_bridge.py work.
+                # RTC (real-time chunking) rides along as sibling keys: "rtc_shift" (actions executed
+                # since the last query, for prefix time-alignment) + "rtc_reset" (start-of-episode).
+                infer_kwargs = {}
                 if isinstance(obs, dict) and obs.get("method") == "infer" and "obs" in obs:
                     _noise = obs.get("noise")
+                    if obs.get("rtc_shift") is not None:
+                        infer_kwargs["rtc_shift"] = int(obs["rtc_shift"])
+                    if obs.get("rtc_reset"):
+                        infer_kwargs["rtc_reset"] = True
                     obs = obs["obs"]
                     if _noise is not None:
                         obs["noise"] = _noise
 
                 infer_time = time.monotonic()
-                action = self._policy.infer(obs)
+                action = self._policy.infer(obs, **infer_kwargs)
                 infer_time = time.monotonic() - infer_time
 
                 action["server_timing"] = {
