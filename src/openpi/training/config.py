@@ -1092,6 +1092,24 @@ _CONFIGS = [
         ema_decay=0.999,
         num_train_steps=30_000,
     ),
+    TrainConfig(
+        name="pi05_yam_blockstack",
+        # Finetune pi05 on the BlockOnBlock YAM dataset (repo_id local/blockstack_yam, 14-D bimanual,
+        # 3 cameras). asset_id="pi05_yam_blockstack" matches the norm_stats shipped in the checkpoint
+        # (assets/pi05_yam_blockstack/norm_stats.json for steps 10000/15000/29999). LeRobotYAMDataConfig
+        # applies the same YAMInputs/YAMOutputs transforms as the other YAM configs. action_horizon=49
+        # here is a serve-time upper bound; the runner's ActionChunkBroker clamps to the model's real
+        # chunk length at load (rfm_rl_robot fix-pi05-broker-horizon), so a mismatch can't IndexError.
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=49),
+        data=LeRobotYAMDataConfig(
+            repo_id="local/blockstack_yam",
+            assets=AssetsConfig(asset_id="pi05_yam_blockstack"),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=4,
+    ),
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
