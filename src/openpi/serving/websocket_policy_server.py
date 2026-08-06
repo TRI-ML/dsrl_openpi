@@ -56,6 +56,15 @@ class WebsocketPolicyServer:
             try:
                 start_time = time.monotonic()
                 obs = msgpack_numpy.unpackb(await websocket.recv())
+                # The openpi-client WebsocketClientPolicy wraps the payload as
+                # {"method": "infer", "obs": {...}} (+ optional "noise"); older
+                # servers expected the bare obs dict. Unwrap for compatibility so
+                # both the eval client and deployment/openpi_bridge.py work.
+                if isinstance(obs, dict) and obs.get("method") == "infer" and "obs" in obs:
+                    _noise = obs.get("noise")
+                    obs = obs["obs"]
+                    if _noise is not None:
+                        obs["noise"] = _noise
 
                 infer_time = time.monotonic()
                 action = self._policy.infer(obs)
