@@ -55,10 +55,18 @@ class WebsocketPolicyServer:
         while True:
             try:
                 start_time = time.monotonic()
-                obs = msgpack_numpy.unpackb(await websocket.recv())
+                msg = msgpack_numpy.unpackb(await websocket.recv())
+                # The openpi-client wraps the observation in an envelope {"method","obs"}; older
+                # clients sent the obs dict directly. Accept both.
+                obs = msg["obs"] if isinstance(msg, dict) and "obs" in msg else msg
 
                 infer_time = time.monotonic()
-                action = self._policy.infer(obs)
+                # DSRL noise-steering: the client (websocket_client_policy.infer(obs, noise)) puts the
+                # seed noise into obs["noise"]. Pop it and thread it into the flow-matching sampler so
+                # a served pi05 can be steered exactly like the in-process Pi0Wrapper.infer(obs, noise).
+                # Absent (normal deterministic serving) -> noise=None, unchanged behavior.
+                noise = obs.pop("noise", None) if isinstance(obs, dict) else None
+                action = self._policy.infer(obs, noise=noise) if noise is not None else self._policy.infer(obs)
                 infer_time = time.monotonic() - infer_time
 
                 action["server_timing"] = {
