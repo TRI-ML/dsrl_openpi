@@ -1092,6 +1092,51 @@ _CONFIGS = [
         ema_decay=0.999,
         num_train_steps=30_000,
     ),
+    # pi05 finetune on OUR 52-ep raiden PickupBanana (repo_id local/pickupbanana52_yam), distinct
+    # from pi05_yam_pickbanana which was trained on Arsh data. Same recipe, only the data differs.
+    TrainConfig(
+        name="pi05_yam_pickbanana52",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
+        data=SimpleDataConfig(
+            repo_id="local/pickupbanana52_yam",
+            assets=AssetsConfig(asset_id="pi05_yam_pickbanana52"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[yam_policy.YAMInputs(model_type=model.model_type)],
+                outputs=[yam_policy.YAMOutputs()],
+            ),
+            base_config=DataConfig(
+                # Map LeRobot dataset feature keys -> keys expected by YAMInputs.
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation/image_head": "observation.images.scene_camera",
+                                "observation/image_left_wrist": "observation.images.left_wrist_camera",
+                                "observation/image_right_wrist": "observation.images.right_wrist_camera",
+                                "observation/state": "observation.state",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+                prompt_from_task=True,
+                # LeRobot dataset stores actions under the singular key "action".
+                action_sequence_keys=("action",),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=30_000,
+    ),
     # pi05 finetune on the UnloadPlates YAM LeRobot dataset (repo_id local/unload_plates_yam, 14-D
     # bimanual, 3 cameras). Ported from the dgx training checkout so serve-time transforms match
     # training. asset_id="pi05_yam_unload_plates" matches the norm_stats shipped in the checkpoint.
@@ -1138,6 +1183,60 @@ _CONFIGS = [
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
         num_train_steps=40_000,
+    ),
+    # pi05 LoRA finetune on the HangMugOnMugTree YAM dataset (ykorkmaz/yam_hang_mug_on_mug_tree,
+    # 14-D bimanual, 3 cameras). NAME must match what deploy requests (the run name
+    # pi05_yam_mug_on_mug_tree), and asset_id must match the norm_stats shipped IN the checkpoint
+    # (assets/pi05_yam_mugontree/norm_stats.json) — NOT the training config's own name. LoRA model
+    # variants must match training so params load; freeze_filter is unused at serve time.
+    TrainConfig(
+        name="pi05_yam_mug_on_mug_tree",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=25,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=SimpleDataConfig(
+            repo_id="ykorkmaz/yam_hang_mug_on_mug_tree",
+            assets=AssetsConfig(asset_id="pi05_yam_mugontree"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[yam_policy.YAMInputs(model_type=model.model_type)],
+                outputs=[yam_policy.YAMOutputs()],
+            ),
+            base_config=DataConfig(
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation/image_head": "observation.images.scene_camera",
+                                "observation/image_left_wrist": "observation.images.left_wrist_camera",
+                                "observation/image_right_wrist": "observation.images.right_wrist_camera",
+                                "observation/state": "observation.state",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=25,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000, peak_lr=5e-5, decay_steps=30_000, decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        num_train_steps=30_000,
     ),
     TrainConfig(
         name="pi05_yam_blockstack",
