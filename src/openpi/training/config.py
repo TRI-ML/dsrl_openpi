@@ -1137,6 +1137,50 @@ _CONFIGS = [
         ema_decay=0.999,
         num_train_steps=30_000,
     ),
+    # pi05 finetune on the raiden flip_pink_cup task. Verbatim clone of pi05_yam_pickbanana52 (same
+    # recipe, proven on banana); only name/repo_id/asset_id change. Dataset local/flippinkcup_yam is
+    # built by yam_dataset_builder/convert_yam_video_to_lerobot.py from the raiden processed export.
+    TrainConfig(
+        name="pi05_yam_flippinkcup",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
+        data=SimpleDataConfig(
+            repo_id="local/flippinkcup_yam",
+            assets=AssetsConfig(asset_id="pi05_yam_flippinkcup"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[yam_policy.YAMInputs(model_type=model.model_type)],
+                outputs=[yam_policy.YAMOutputs()],
+            ),
+            base_config=DataConfig(
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation/image_head": "observation.images.scene_camera",
+                                "observation/image_left_wrist": "observation.images.left_wrist_camera",
+                                "observation/image_right_wrist": "observation.images.right_wrist_camera",
+                                "observation/state": "observation.state",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=30_000,
+    ),
     # pi05 finetune on the UnloadPlates YAM LeRobot dataset (repo_id local/unload_plates_yam, 14-D
     # bimanual, 3 cameras). Ported from the dgx training checkout so serve-time transforms match
     # training. asset_id="pi05_yam_unload_plates" matches the norm_stats shipped in the checkpoint.
