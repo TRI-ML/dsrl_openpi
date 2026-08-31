@@ -36,8 +36,14 @@ import tqdm
 import tyro
 
 # Reuse the exact schema constants + ffmpeg encoder from the per-frame converter so the two datasets are
-# byte-for-byte compatible consumers of the same pi05 config.
-from yam_dataset_builder.convert_yam_data_to_lerobot import CAMERAS, FPS, MOTORS, encode_video_ffmpeg
+# byte-for-byte compatible consumers of the same pi05 config. Robust to being run as a script (path) or
+# imported as part of the package.
+try:
+    from yam_dataset_builder.convert_yam_data_to_lerobot import CAMERAS, FPS, MOTORS, encode_video_ffmpeg
+except ModuleNotFoundError:
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from convert_yam_data_to_lerobot import CAMERAS, FPS, MOTORS, encode_video_ffmpeg
 
 
 @dataclasses.dataclass(frozen=True)
