@@ -1021,6 +1021,285 @@ _CONFIGS = [
         batch_size=32,
         num_workers=4,
     ),
+    # SERVE-ONLY: the raw pretrained pi05 base (NO YAM finetune) on the YAM rig, for
+    # zero-shot vibe-testing the generalist. Loads the pi05_base checkpoint directly
+    # (action_dim=32 to match its action projection; YAM 14-D is padded via YAMInputs/
+    # PadStatesAndActions) and uses the base checkpoint's own robot-lab/Sort_objects_lf
+    # YAM norm stats. Point serve_policy at the base checkpoint dir:
+    #   --policy.dir=~/.cache/openpi/openpi-assets/checkpoints/pi05_base
+    TrainConfig(
+        name="pi05_yam_base",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=49),
+        data=LeRobotYAMDataConfig(
+            repo_id="robot-lab/Sort_objects_lf",
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                asset_id="robot-lab/Sort_objects_lf",
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=4,
+    ),
+    # pi05 finetune on the PickupBanana YAM LeRobot v2.1 dataset (repo_id local/pickupbanana_yam).
+    # Ported from the training checkout (dgx05, openpi f08d5b5) where pi05_yam_pickbanana was trained,
+    # so serve-time transforms match training exactly. asset_id="pi05_yam_pickbanana" matches the
+    # norm_stats shipped inside the checkpoint (assets/pi05_yam_pickbanana/norm_stats.json).
+    # State/action are 14-D (left arm 6 joints + grip, right arm 6 joints + grip); padded to
+    # action_dim=32 by PadStatesAndActions to match the pi05 base action_in_proj (32,1024);
+    # YAMOutputs slices back to the first 14 dims at inference.
+    TrainConfig(
+        name="pi05_yam_pickbanana",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
+        data=SimpleDataConfig(
+            repo_id="local/pickupbanana_yam",
+            assets=AssetsConfig(asset_id="pi05_yam_pickbanana"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[yam_policy.YAMInputs(model_type=model.model_type)],
+                outputs=[yam_policy.YAMOutputs()],
+            ),
+            base_config=DataConfig(
+                # Map LeRobot dataset feature keys -> keys expected by YAMInputs.
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation/image_head": "observation.images.scene_camera",
+                                "observation/image_left_wrist": "observation.images.left_wrist_camera",
+                                "observation/image_right_wrist": "observation.images.right_wrist_camera",
+                                "observation/state": "observation.state",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+                prompt_from_task=True,
+                # LeRobot dataset stores actions under the singular key "action".
+                action_sequence_keys=("action",),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=30_000,
+    ),
+    # pi05 finetune on OUR 52-ep raiden PickupBanana (repo_id local/pickupbanana52_yam), distinct
+    # from pi05_yam_pickbanana which was trained on Arsh data. Same recipe, only the data differs.
+    TrainConfig(
+        name="pi05_yam_pickbanana52",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
+        data=SimpleDataConfig(
+            repo_id="local/pickupbanana52_yam",
+            assets=AssetsConfig(asset_id="pi05_yam_pickbanana52"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[yam_policy.YAMInputs(model_type=model.model_type)],
+                outputs=[yam_policy.YAMOutputs()],
+            ),
+            base_config=DataConfig(
+                # Map LeRobot dataset feature keys -> keys expected by YAMInputs.
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation/image_head": "observation.images.scene_camera",
+                                "observation/image_left_wrist": "observation.images.left_wrist_camera",
+                                "observation/image_right_wrist": "observation.images.right_wrist_camera",
+                                "observation/state": "observation.state",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+                prompt_from_task=True,
+                # LeRobot dataset stores actions under the singular key "action".
+                action_sequence_keys=("action",),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=30_000,
+    ),
+    # pi05 finetune on the raiden flip_pink_cup task. Verbatim clone of pi05_yam_pickbanana52 (same
+    # recipe, proven on banana); only name/repo_id/asset_id change. Dataset local/flippinkcup_yam is
+    # built by yam_dataset_builder/convert_yam_video_to_lerobot.py from the raiden processed export.
+    TrainConfig(
+        name="pi05_yam_flippinkcup",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
+        data=SimpleDataConfig(
+            repo_id="local/flippinkcup_yam",
+            assets=AssetsConfig(asset_id="pi05_yam_flippinkcup"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[yam_policy.YAMInputs(model_type=model.model_type)],
+                outputs=[yam_policy.YAMOutputs()],
+            ),
+            base_config=DataConfig(
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation/image_head": "observation.images.scene_camera",
+                                "observation/image_left_wrist": "observation.images.left_wrist_camera",
+                                "observation/image_right_wrist": "observation.images.right_wrist_camera",
+                                "observation/state": "observation.state",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=30_000,
+    ),
+    # pi05 finetune on the UnloadPlates YAM LeRobot dataset (repo_id local/unload_plates_yam, 14-D
+    # bimanual, 3 cameras). Ported from the dgx training checkout so serve-time transforms match
+    # training. asset_id="pi05_yam_unload_plates" matches the norm_stats shipped in the checkpoint.
+    # action_horizon=15 as trained; the runner's ActionChunkBroker clamps to the model chunk at load.
+    TrainConfig(
+        name="pi05_yam_unload_plates",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=15),
+        data=SimpleDataConfig(
+            repo_id="local/unload_plates_yam",
+            assets=AssetsConfig(asset_id="pi05_yam_unload_plates"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[yam_policy.YAMInputs(model_type=model.model_type)],
+                outputs=[yam_policy.YAMOutputs()],
+            ),
+            base_config=DataConfig(
+                # Map LeRobot dataset feature keys -> keys expected by YAMInputs.
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation/image_head": "observation.images.scene_camera",
+                                "observation/image_left_wrist": "observation.images.left_wrist_camera",
+                                "observation/image_right_wrist": "observation.images.right_wrist_camera",
+                                "observation/state": "observation.state",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+                prompt_from_task=True,
+                # LeRobot dataset stores actions under the singular key "action".
+                action_sequence_keys=("action",),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=40_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=40_000,
+    ),
+    # pi05 LoRA finetune on the HangMugOnMugTree YAM dataset (ykorkmaz/yam_hang_mug_on_mug_tree,
+    # 14-D bimanual, 3 cameras). NAME must match what deploy requests (the run name
+    # pi05_yam_mug_on_mug_tree), and asset_id must match the norm_stats shipped IN the checkpoint
+    # (assets/pi05_yam_mugontree/norm_stats.json) — NOT the training config's own name. LoRA model
+    # variants must match training so params load; freeze_filter is unused at serve time.
+    TrainConfig(
+        name="pi05_yam_mug_on_mug_tree",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=25,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=SimpleDataConfig(
+            repo_id="ykorkmaz/yam_hang_mug_on_mug_tree",
+            assets=AssetsConfig(asset_id="pi05_yam_mugontree"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[yam_policy.YAMInputs(model_type=model.model_type)],
+                outputs=[yam_policy.YAMOutputs()],
+            ),
+            base_config=DataConfig(
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation/image_head": "observation.images.scene_camera",
+                                "observation/image_left_wrist": "observation.images.left_wrist_camera",
+                                "observation/image_right_wrist": "observation.images.right_wrist_camera",
+                                "observation/state": "observation.state",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=25,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000, peak_lr=5e-5, decay_steps=30_000, decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi05_yam_blockstack",
+        # Finetune pi05 on the BlockOnBlock YAM dataset (repo_id local/blockstack_yam, 14-D bimanual,
+        # 3 cameras). asset_id="pi05_yam_blockstack" matches the norm_stats shipped in the checkpoint
+        # (assets/pi05_yam_blockstack/norm_stats.json for steps 10000/15000/29999). LeRobotYAMDataConfig
+        # applies the same YAMInputs/YAMOutputs transforms as the other YAM configs. action_horizon=49
+        # here is a serve-time upper bound; the runner's ActionChunkBroker clamps to the model's real
+        # chunk length at load (rfm_rl_robot fix-pi05-broker-horizon), so a mismatch can't IndexError.
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=49),
+        data=LeRobotYAMDataConfig(
+            repo_id="local/blockstack_yam",
+            assets=AssetsConfig(asset_id="pi05_yam_blockstack"),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=4,
+    ),
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),

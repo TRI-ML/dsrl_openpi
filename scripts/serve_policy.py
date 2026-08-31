@@ -1,6 +1,7 @@
 import dataclasses
 import enum
 import logging
+import os
 import socket
 
 import tyro
@@ -85,12 +86,40 @@ def create_default_policy(env: EnvMode, *, default_prompt: str | None = None) ->
     raise ValueError(f"Unsupported environment mode: {env}")
 
 
+def _rtc_from_env() -> dict | None:
+    """Read Real-Time Chunking config from env so the launcher can enable it without a CLI-schema
+    change (matches how the eval service passes other server opts). Returns None (→ plain sampler,
+    unchanged behavior) unless OPENPI_RTC=1. Blog defaults: sigma=0.2, max_guidance_weight=num_steps."""
+    if os.environ.get("OPENPI_RTC", "0") != "1":
+        return None
+    def _f(k, d):
+        v = os.environ.get(k)
+        return float(v) if v not in (None, "") else d
+    def _i(k, d):
+        v = os.environ.get(k)
+        return int(v) if v not in (None, "") else d
+    num_steps = _i("OPENPI_RTC_NUM_STEPS", 10)
+    return {
+        "enabled": True,
+        "num_steps": num_steps,
+        "inference_delay": _i("OPENPI_RTC_INFERENCE_DELAY", 1),
+        "prefix_attention_horizon": _i("OPENPI_RTC_PREFIX_HORIZON", 4),
+        "prefix_attention_schedule": os.environ.get("OPENPI_RTC_SCHEDULE", "exp"),
+        "sigma": _f("OPENPI_RTC_SIGMA", 0.2),
+        # β=n rule of thumb (blog): default the clip to num_steps unless explicitly set.
+        "max_guidance_weight": _f("OPENPI_RTC_MAX_GUIDANCE", float(num_steps)),
+    }
+
+
 def create_policy(args: Args) -> _policy.Policy:
     """Create a policy from the given arguments."""
+    rtc = _rtc_from_env()
+    if rtc:
+        logging.info("RTC enabled: %s", rtc)
     match args.policy:
         case Checkpoint():
             return _policy_config.create_trained_policy(
-                _config.get_config(args.policy.config), args.policy.dir, default_prompt=args.default_prompt
+                _config.get_config(args.policy.config), args.policy.dir, default_prompt=args.default_prompt, rtc=rtc
             )
         case Default():
             return create_default_policy(args.env, default_prompt=args.default_prompt)

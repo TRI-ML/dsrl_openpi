@@ -44,10 +44,16 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
                 time.sleep(5)
 
     @override
-    def infer(self, obs: Dict, noise: float = None) -> Dict:  # noqa: UP006
+    def infer(self, obs: Dict, noise: float = None, rtc_shift: int = None, rtc_reset: bool = False) -> Dict:  # noqa: UP006
         if noise is not None:
             obs = {**obs, "noise": noise}
         message = {"method": "infer", "obs": obs}
+        # RTC (real-time chunking) hints for the server, ignored by non-RTC servers/policies:
+        # rtc_shift = actions executed since the last query (prefix alignment); rtc_reset = new episode.
+        if rtc_shift is not None:
+            message["rtc_shift"] = int(rtc_shift)
+        if rtc_reset:
+            message["rtc_reset"] = True
         data = self._packer.pack(message)
         self._ws.send(data)
         response = self._ws.recv()
