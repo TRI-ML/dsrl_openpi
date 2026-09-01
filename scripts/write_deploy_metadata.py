@@ -21,7 +21,8 @@ import json
 from pathlib import Path
 
 
-def build_metadata(config_name: str, task_instruction: str | None) -> dict:
+def build_metadata(config_name: str, task_instruction: str | None,
+                   dataset_snapshot_id: str | None = None) -> dict:
     from openpi.training import config as _config
 
     cfg = _config.get_config(config_name)
@@ -51,7 +52,10 @@ def build_metadata(config_name: str, task_instruction: str | None) -> dict:
         "model_family": "pi05",
         "dataset": {"repo_id": repo_id, "local_path": None,
                     "s3_uri": f"s3://tri-ml-datasets-uw2/raiden_datasets/lerobot/{repo_id.split('/')[-1]}"
-                              if repo_id else None},
+                              if repo_id else None,
+                    # the registered DatasetSnapshot this trained on, so `yam model register` links
+                    # checkpoint→dataset machine-read instead of by name lookup (None until provided).
+                    "snapshot_id": dataset_snapshot_id},
     }
 
 
@@ -60,8 +64,10 @@ def main() -> None:
     ap.add_argument("--checkpoint-dir", required=True, help="the final step dir (…/<exp>/<step>)")
     ap.add_argument("--config-name", required=True)
     ap.add_argument("--task-instruction", default=None)
+    ap.add_argument("--dataset-snapshot-id", default=None,
+                    help="the registered DatasetSnapshot this trained on (links checkpoint→dataset)")
     args = ap.parse_args()
-    meta = build_metadata(args.config_name, args.task_instruction)
+    meta = build_metadata(args.config_name, args.task_instruction, args.dataset_snapshot_id)
     out = Path(args.checkpoint_dir) / "deploy_metadata.json"
     out.write_text(json.dumps(meta, indent=2))
     print(f"wrote {out}")
