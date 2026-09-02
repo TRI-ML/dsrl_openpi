@@ -22,7 +22,8 @@ from pathlib import Path
 
 
 def build_metadata(config_name: str, task_instruction: str | None,
-                   dataset_snapshot_id: str | None = None) -> dict:
+                   dataset_snapshot_id: str | None = None,
+                   wandb: dict | None = None) -> dict:
     from openpi.training import config as _config
 
     cfg = _config.get_config(config_name)
@@ -50,6 +51,7 @@ def build_metadata(config_name: str, task_instruction: str | None,
         "task_instruction": task_instruction,
         "language_conditioned": True,
         "model_family": "pi05",
+        "wandb": wandb,   # {id,url,project,entity} of the training run; None if not passed
         "dataset": {"repo_id": repo_id, "local_path": None,
                     "s3_uri": f"s3://tri-ml-datasets-uw2/raiden_datasets/lerobot/{repo_id.split('/')[-1]}"
                               if repo_id else None,
@@ -66,8 +68,16 @@ def main() -> None:
     ap.add_argument("--task-instruction", default=None)
     ap.add_argument("--dataset-snapshot-id", default=None,
                     help="the registered DatasetSnapshot this trained on (links checkpoint→dataset)")
+    ap.add_argument("--wandb-url", default=None, help="training wandb run URL (links checkpoint→run)")
+    ap.add_argument("--wandb-id", default=None)
+    ap.add_argument("--wandb-project", default=None)
+    ap.add_argument("--wandb-entity", default=None)
     args = ap.parse_args()
-    meta = build_metadata(args.config_name, args.task_instruction, args.dataset_snapshot_id)
+    # This sidecar is written after training, so there's no live wandb run to read — the launcher passes
+    # the run it created. Build the block only from what was given; else None (no fabricated entity).
+    wandb = {k: v for k, v in (("id", args.wandb_id), ("url", args.wandb_url),
+                               ("project", args.wandb_project), ("entity", args.wandb_entity)) if v} or None
+    meta = build_metadata(args.config_name, args.task_instruction, args.dataset_snapshot_id, wandb=wandb)
     out = Path(args.checkpoint_dir) / "deploy_metadata.json"
     out.write_text(json.dumps(meta, indent=2))
     print(f"wrote {out}")
