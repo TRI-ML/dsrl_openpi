@@ -1,86 +1,44 @@
-"""Write the deploy_metadata.json sidecar next to a trained openpi checkpoint.
+"""Backfill deploy_metadata.json next to an existing openpi checkpoint.
 
-openpi's train.py writes params/ train_state/ assets/ _CHECKPOINT_METADATA but NOT the self-describing
-sidecar that YAM Eval / serving / the yam-registry ingest bridge read. This backfills it from the
-TrainConfig, so a pi05 checkpoint registers like rfm_rl and foundry do.
+train.py writes this sidecar at every save (openpi.training.deploy_metadata); this CLI is for checkpoints trained
+before that, or on a host that can import openpi but not the dataset. Task strings come from the dataset when it
+is reachable, else from --task-instruction; the wandb run from --wandb-* (there is no live run after training).
 
-  uv run scripts/write_deploy_metadata.py \
-      --checkpoint-dir <checkpoint_base>/<exp>/<step> \
-      --config-name pi05_yam_flippinkcup \
-      --task-instruction "flip pink cup upside down and then right side up."
-
-Shapes are the YAM bimanual contract the YAMInputs transform enforces (14-D action/state padded to 32,
-3 cameras @224); action_horizon comes from the config. This is intentionally standalone (argparse + the
-config registry) so it runs on any host that can import openpi, after training.
+  uv run scripts/write_deploy_metadata.py --checkpoint-dir <exp>/<step> --config-name pi05_yam_flippinkcup \
+      --task-instruction "flip pink cup upside down and then right side up." --wandb-url https://wandb.ai/tri/rfm_rl/runs/<id>
 """
-
 from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 
-
-def build_metadata(config_name: str, task_instruction: str | None,
-                   dataset_snapshot_id: str | None = None,
-                   wandb: dict | None = None) -> dict:
-    from openpi.training import config as _config
-
-    cfg = _config.get_config(config_name)
-    repo_id = getattr(cfg.data, "repo_id", None)
-    asset_id = getattr(getattr(cfg.data, "assets", None), "asset_id", None)
-    horizon = int(cfg.model.action_horizon)
-    return {
-        "schema_version": 1,
-        "action_dim": 14,
-        "state_dim": 14,
-        "action_dim_padded": 32,
-        "images": {"scene_camera": [224, 224, 3],
-                   "left_wrist_camera": [224, 224, 3],
-                   "right_wrist_camera": [224, 224, 3]},
-        "image_keys": ["scene_camera", "left_wrist_camera", "right_wrist_camera"],
-        "image_obs_keys": ["observation/image_head", "observation/image_left_wrist",
-                           "observation/image_right_wrist"],
-        "proprio_keys": ["follower_l_joint_pos_7d", "follower_r_joint_pos_7d"],
-        "act_steps": horizon,
-        "action_horizon": horizon,
-        "control_hz": None,
-        "config_name": config_name,
-        "openpi_config": config_name,
-        "asset_id": asset_id,
-        "task_instruction": task_instruction,
-        "language_conditioned": True,
-        "model_family": "pi05",
-        "wandb": wandb,   # {id,url,project,entity} of the training run; None if not passed
-        "dataset": {"repo_id": repo_id, "local_path": None,
-                    "s3_uri": f"s3://tri-ml-datasets-uw2/raiden_datasets/lerobot/{repo_id.split('/')[-1]}"
-                              if repo_id else None,
-                    # the registered DatasetSnapshot this trained on, so `yam model register` links
-                    # checkpoint→dataset machine-read instead of by name lookup (None until provided).
-                    "snapshot_id": dataset_snapshot_id},
-    }
+from openpi.training import config as _config
+from openpi.training import deploy_metadata as _dm
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--checkpoint-dir", required=True, help="the final step dir (…/<exp>/<step>)")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--checkpoint-dir", required=True, help="the step dir (<exp>/<step>)")
     ap.add_argument("--config-name", required=True)
-    ap.add_argument("--task-instruction", default=None)
-    ap.add_argument("--dataset-snapshot-id", default=None,
-                    help="the registered DatasetSnapshot this trained on (links checkpoint→dataset)")
-    ap.add_argument("--wandb-url", default=None, help="training wandb run URL (links checkpoint→run)")
+    ap.add_argument("--task-instruction", default=None, help="override; default = the dataset's task strings")
+    ap.add_argument("--dataset-snapshot-id", default=None)
+    ap.add_argument("--wandb-url", default=None)
     ap.add_argument("--wandb-id", default=None)
     ap.add_argument("--wandb-project", default=None)
     ap.add_argument("--wandb-entity", default=None)
+    ap.add_argument("--git-sha", default=None, help="code version the checkpoint was trained with")
     args = ap.parse_args()
-    # This sidecar is written after training, so there's no live wandb run to read — the launcher passes
-    # the run it created. Build the block only from what was given; else None (no fabricated entity).
-    wandb = {k: v for k, v in (("id", args.wandb_id), ("url", args.wandb_url),
-                               ("project", args.wandb_project), ("entity", args.wandb_entity)) if v} or None
-    meta = build_metadata(args.config_name, args.task_instruction, args.dataset_snapshot_id, wandb=wandb)
-    out = Path(args.checkpoint_dir) / "deploy_metadata.json"
+    cfg = _config.get_config(args.config_name)
+    tasks = None if args.task_instruction else _dm.tasks_from_dataset(cfg)
+    meta = _dm.build_metadata(cfg, tasks=tasks, task_instruction=args.task_instruction,
+                              dataset_snapshot_id=args.dataset_snapshot_id, code_sha=args.git_sha)
+    wandb = {k: v for k, v in (("id", args.wandb_id), ("url", args.wandb_url), ("project", args.wandb_project),
+                               ("entity", args.wandb_entity)) if v}
+    meta["wandb"] = wandb or None
+    out = _dm.write_sidecar(cfg, args.checkpoint_dir, tasks=tasks, task_instruction=args.task_instruction,
+                            dataset_snapshot_id=args.dataset_snapshot_id, code_sha=args.git_sha)
     out.write_text(json.dumps(meta, indent=2))
-    print(f"wrote {out}")
+    print(f"wrote {out}: task_instruction={meta['task_instruction']!r} wandb={meta['wandb']}")
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ import openpi.models.model as _model
 import openpi.shared.array_typing as at
 import openpi.shared.nnx_utils as nnx_utils
 import openpi.training.checkpoints as _checkpoints
+import openpi.training.deploy_metadata as _deploy_metadata
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
 import openpi.training.optimizer as _optimizer
@@ -216,6 +217,10 @@ def main(config: _config.TrainConfig):
         resume=config.resume,
     )
     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
+    # the sidecar every saved step gets: task strings straight from the dataset, the live wandb run, the code version
+    sidecar_tasks = _deploy_metadata.tasks_from_dataset(config)
+    sidecar_sha = _deploy_metadata.git_sha()
+    logging.info("deploy_metadata: tasks=%s git=%s", sidecar_tasks, sidecar_sha)
 
     data_loader = _data_loader.create_data_loader(
         config,
@@ -271,6 +276,13 @@ def main(config: _config.TrainConfig):
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
+            if jax.process_index() == 0:
+                checkpoint_manager.wait_until_finished()
+                try:
+                    _deploy_metadata.write_sidecar(config, config.checkpoint_dir / str(step), wandb_run=wandb.run,
+                                                   tasks=sidecar_tasks, code_sha=sidecar_sha)
+                except Exception as e:  # noqa: BLE001 - a sidecar must never abort training
+                    logging.warning("deploy_metadata.json not written for step %d: %s", step, e)
 
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()

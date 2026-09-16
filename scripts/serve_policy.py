@@ -118,8 +118,16 @@ def create_policy(args: Args) -> _policy.Policy:
         logging.info("RTC enabled: %s", rtc)
     match args.policy:
         case Checkpoint():
+            try:
+                train_config = _config.get_config(args.policy.config)
+            except ValueError as e:
+                # not registered on this host: rebuild the config from the checkpoint's own sidecar
+                import openpi.training.deploy_metadata as _deploy_metadata
+                train_config = _deploy_metadata.config_from_sidecar(args.policy.dir)
+                logging.warning("config %r not registered here (%s); serving from %s/deploy_metadata.json",
+                                args.policy.config, e, args.policy.dir)
             return _policy_config.create_trained_policy(
-                _config.get_config(args.policy.config), args.policy.dir, default_prompt=args.default_prompt, rtc=rtc
+                train_config, args.policy.dir, default_prompt=args.default_prompt, rtc=rtc
             )
         case Default():
             return create_default_policy(args.env, default_prompt=args.default_prompt)
