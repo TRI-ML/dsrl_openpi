@@ -71,6 +71,9 @@ def build_metadata(config, *, wandb_run=None, tasks: list[str] | None = None, ta
     repo_id = getattr(config.data, "repo_id", None)
     asset_id = getattr(getattr(config.data, "assets", None), "asset_id", None)
     horizon = int(model.action_horizon)
+    # exp_name is a tyro MISSING sentinel (not JSON-serialisable) when the config was built outside the train CLI
+    exp_name = getattr(config, "exp_name", None)
+    exp_name = exp_name if isinstance(exp_name, str) else None
     if task_instruction is None and tasks:
         task_instruction = " | ".join(tasks)
     return {
@@ -87,7 +90,7 @@ def build_metadata(config, *, wandb_run=None, tasks: list[str] | None = None, ta
         "control_hz": None,
         "config_name": config.name,
         "openpi_config": config.name,
-        "exp_name": getattr(config, "exp_name", None),
+        "exp_name": exp_name,
         "asset_id": asset_id,
         "model": {"pi05": bool(getattr(model, "pi05", False)),
                   "paligemma_variant": getattr(model, "paligemma_variant", None),
