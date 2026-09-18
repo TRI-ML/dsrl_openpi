@@ -84,6 +84,9 @@ def build_metadata(config, *, wandb_run=None, tasks: list[str] | None = None, ta
         "images": {c: [224, 224, 3] for c in CAMERA_KEYS},
         "image_keys": list(CAMERA_KEYS),
         "image_obs_keys": list(IMAGE_OBS_KEYS),
+        # YAM fleet: the right wrist camera is mounted upside-down; serving must rotate it 180 to match
+        # the training data orientation (matches the previously-published pi05_yam_placeteabag sidecar).
+        "camera_conventions": {"right_wrist_camera": "rotate180"},
         "proprio_keys": ["follower_l_joint_pos_7d", "follower_r_joint_pos_7d"],
         "act_steps": horizon,
         "action_horizon": horizon,
