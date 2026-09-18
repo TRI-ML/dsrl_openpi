@@ -279,6 +279,30 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
         )
 
 
+def _yam_data_transforms(model_config: _model.BaseModelConfig, *, use_delta_joint_actions: bool = False) -> _transforms.Group:
+    """Build the YAM (14D bimanual) data transforms.
+
+    When ``use_delta_joint_actions`` is True, the 6 joint dims of each arm are converted to deltas
+    w.r.t. the current state on input (DeltaActions) and reconstructed to absolute on output
+    (AbsoluteActions); the gripper dim of each arm stays absolute. Mask = make_bool_mask(6, -1, 6, -1)
+    over the 14D [l_joints(6), l_gripper(1), r_joints(6), r_gripper(1)] action vector. This is the
+    inverse pair that keeps train and serve consistent and prevents the pi05 proprio-copycat failure
+    (absolute action[t] ~= state[t] collapses the model onto copying proprio). Mirrors
+    LeRobotAlohaDataConfig.
+    """
+    group = _transforms.Group(
+        inputs=[yam_policy.YAMInputs(model_type=model_config.model_type)],
+        outputs=[yam_policy.YAMOutputs()],
+    )
+    if use_delta_joint_actions:
+        delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
+        group = group.push(
+            inputs=[_transforms.DeltaActions(delta_action_mask)],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+        )
+    return group
+
+
 @dataclasses.dataclass(frozen=True)
 class LeRobotYAMDataConfig(DataConfigFactory):
     """Data config for YAM bimanual robot (14D joint space)."""
@@ -306,10 +330,7 @@ class LeRobotYAMDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        data_transforms = _transforms.Group(
-            inputs=[yam_policy.YAMInputs(model_type=model_config.model_type)],
-            outputs=[yam_policy.YAMOutputs()],
-        )
+        data_transforms = _yam_data_transforms(model_config, use_delta_joint_actions=self.use_delta_joint_actions)
         model_transforms = ModelTransformFactory()(model_config)
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
@@ -1088,6 +1109,307 @@ _CONFIGS = [
             decay_steps=30_000,
             decay_lr=5e-6,
         ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=30_000,
+    ),
+    # pi05 finetune on the TRUE 52-ep raiden PickupBanana (repo_id local/pickupbanana52_yam).
+    # Clone of pi05_yam_pickbanana; only dataset + asset_id differ. Added for the async DSRL learner.
+    # pi05 FULL finetune on MakeCoffee (Keurig) 2026-09-17: clone of pi05_yam_placeteabag_full30k on the MakeCoffee
+    # LeRobot materialization (local/makecoffee_yam, 178 eps / 254067 frames); full FT (no LoRA/freeze), EMA 0.999,
+    # 30k steps, ckpt every 5k kept. Prompt from the dataset task string (prompt_from_task).
+    TrainConfig(
+        name="pi05_yam_makecoffee_full30k",
+        project_name="rfm_rl",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
+        data=SimpleDataConfig(
+            repo_id="local/makecoffee_yam",
+            assets=AssetsConfig(asset_id="pi05_yam_makecoffee_full30k"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[yam_policy.YAMInputs(model_type=model.model_type)],
+                outputs=[yam_policy.YAMOutputs()],
+            ),
+            base_config=DataConfig(
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation/image_head": "observation.images.scene_camera",
+                                "observation/image_left_wrist": "observation.images.left_wrist_camera",
+                                "observation/image_right_wrist": "observation.images.right_wrist_camera",
+                                "observation/state": "observation.state",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=30_000,
+        save_interval=5_000,
+        keep_period=5_000,
+    ),
+    # pi05 FULL finetune on MakeCoffee (Keurig) v2 2026-09-17: SAME recipe+asset as pi05_yam_makecoffee_full30k (relaunch on dgx13 after dgx02 reboot killed iv8h3yef at 5300; new name keeps the old 5000 ckpt distinguishable). Clone of pi05_yam_placeteabag_full30k on the MakeCoffee
+    # LeRobot materialization (local/makecoffee_yam, 178 eps / 254067 frames); full FT (no LoRA/freeze), EMA 0.999,
+    # 30k steps, ckpt every 5k kept. Prompt from the dataset task string (prompt_from_task).
+    TrainConfig(
+        name="pi05_yam_makecoffee_full30k_v2",
+        project_name="rfm_rl",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
+        data=SimpleDataConfig(
+            repo_id="local/makecoffee_yam",
+            assets=AssetsConfig(asset_id="pi05_yam_makecoffee_full30k"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[yam_policy.YAMInputs(model_type=model.model_type)],
+                outputs=[yam_policy.YAMOutputs()],
+            ),
+            base_config=DataConfig(
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation/image_head": "observation.images.scene_camera",
+                                "observation/image_left_wrist": "observation.images.left_wrist_camera",
+                                "observation/image_right_wrist": "observation.images.right_wrist_camera",
+                                "observation/state": "observation.state",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=30_000,
+        save_interval=5_000,
+        keep_period=5_000,
+    ),
+    # === DELTA-ACTION FIX (proprio-copycat) 2026-09-18 ===
+    # New configs that opt into delta joint actions via _yam_data_transforms(use_delta_joint_actions=True).
+    # NEW asset_ids (..._delta) so freshly-regenerated norm_stats do NOT collide with the existing
+    # absolute-trained served checkpoints (applying AbsoluteActions to an absolute-trained ckpt would
+    # double-count state). Serve MUST run the SAME config so DeltaActions/AbsoluteActions round-trip.
+    # Recipe identical to pi05_yam_makecoffee_full30k: full FT, action_horizon=10, EMA 0.999, peak_lr 5e-5,
+    # clip 1.0, batch 32, 30k steps, ckpt every 5k.
+    TrainConfig(
+        name="pi05_yam_makecoffee_full30k_delta",
+        project_name="rfm_rl",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
+        data=SimpleDataConfig(
+            repo_id="local/makecoffee_yam",
+            assets=AssetsConfig(asset_id="pi05_yam_makecoffee_full30k_delta"),
+            data_transforms=lambda model: _yam_data_transforms(model, use_delta_joint_actions=True),
+            base_config=DataConfig(
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation/image_head": "observation.images.scene_camera",
+                                "observation/image_left_wrist": "observation.images.left_wrist_camera",
+                                "observation/image_right_wrist": "observation.images.right_wrist_camera",
+                                "observation/state": "observation.state",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=30_000,
+        save_interval=5_000,
+        keep_period=5_000,
+    ),
+    # Full-FT teabag with delta actions. Reconstructed from the coffee recipe (there was only a LoRA
+    # teabag config); repo_id local/placeteabag_yam_v2, new asset_id ..._delta.
+    TrainConfig(
+        name="pi05_yam_placeteabag_full30k_delta",
+        project_name="rfm_rl",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
+        data=SimpleDataConfig(
+            repo_id="local/placeteabag_yam_v2",
+            assets=AssetsConfig(asset_id="pi05_yam_placeteabag_full30k_delta"),
+            data_transforms=lambda model: _yam_data_transforms(model, use_delta_joint_actions=True),
+            base_config=DataConfig(
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation/image_head": "observation.images.scene_camera",
+                                "observation/image_left_wrist": "observation.images.left_wrist_camera",
+                                "observation/image_right_wrist": "observation.images.right_wrist_camera",
+                                "observation/state": "observation.state",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=30_000,
+        save_interval=5_000,
+        keep_period=5_000,
+    ),
+    TrainConfig(
+        name="pi05_yam_placeteabag_lora",
+        project_name="rfm_rl",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        freeze_filter=pi0_config.Pi0Config(pi05=True, action_horizon=10, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora").get_freeze_filter(),
+        data=SimpleDataConfig(
+            repo_id="local/placeteabag_yam_v2",
+            assets=AssetsConfig(asset_id="pi05_yam_placeteabag_lora"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[yam_policy.YAMInputs(model_type=model.model_type)],
+                outputs=[yam_policy.YAMOutputs()],
+            ),
+            base_config=DataConfig(
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation/image_head": "observation.images.scene_camera",
+                                "observation/image_left_wrist": "observation.images.left_wrist_camera",
+                                "observation/image_right_wrist": "observation.images.right_wrist_camera",
+                                "observation/state": "observation.state",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=1_000, peak_lr=5e-5, decay_steps=30_000, decay_lr=5e-6),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        num_train_steps=30_000,
+        save_interval=5_000,
+        keep_period=5_000,
+    ),
+    TrainConfig(
+        name="pi05_yam_pickbanana52",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
+        data=SimpleDataConfig(
+            repo_id="local/pickupbanana52_yam",
+            assets=AssetsConfig(asset_id="pi05_yam_pickbanana52"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[yam_policy.YAMInputs(model_type=model.model_type)],
+                outputs=[yam_policy.YAMOutputs()],
+            ),
+            base_config=DataConfig(
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation/image_head": "observation.images.scene_camera",
+                                "observation/image_left_wrist": "observation.images.left_wrist_camera",
+                                "observation/image_right_wrist": "observation.images.right_wrist_camera",
+                                "observation/state": "observation.state",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000, peak_lr=5e-5, decay_steps=30_000, decay_lr=5e-6),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=30_000,
+    ),
+TrainConfig(
+        name="pi05_yam_platerack",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
+        data=SimpleDataConfig(
+            repo_id="local/platerack_yam",
+            assets=AssetsConfig(asset_id="pi05_yam_platerack"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[yam_policy.YAMInputs(model_type=model.model_type)],
+                outputs=[yam_policy.YAMOutputs()],
+            ),
+            base_config=DataConfig(
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation/image_head": "observation.images.scene_camera",
+                                "observation/image_left_wrist": "observation.images.left_wrist_camera",
+                                "observation/image_right_wrist": "observation.images.right_wrist_camera",
+                                "observation/state": "observation.state",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000, peak_lr=5e-5, decay_steps=30_000, decay_lr=5e-6),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
         num_train_steps=30_000,
