@@ -146,3 +146,57 @@ def config_from_sidecar(step_dir: pathlib.Path | str):
             prompt_from_task=True, action_sequence_keys=("action",)),
     )
     return dataclasses.replace(_config.TrainConfig(name=name, model=model, data=data), name=name)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# YAM pi05 sidecar -> TrainConfig (migrated from rfm_rl.utils.pi05_sidecar_config, 2026-09-19).
+#
+# NOTE: `config_from_sidecar` (above) also rebuilds a YAM TrainConfig from a sidecar, but the two are NOT
+# interchangeable and both are kept deliberately (a future consolidation is a separate decision):
+#   * `yam_train_config_from_sidecar` takes the sidecar FILE path, sets action_dim = action_dim_padded, refuses
+#     any non-pi05 sidecar (its callers rely on that refusal to surface a clean error), and stamps
+#     project_name="rfm_rl". It is the DSRL/DICE fallback + the base-server / torch-convert config builder.
+#   * `config_from_sidecar` takes the step DIRECTORY, reads model variants from meta["model"], leaves action_dim
+#     at the Pi0Config default, and adds repack_transforms/action_sequence_keys. It is the serve_policy fallback.
+# Pure: no environment side effects at import (does not pin JAX to the CPU), so it is safe to import from a
+# JAX-on-GPU process; the openpi model/config imports happen lazily inside the builder.
+SIDECAR_NAME = "deploy_metadata.json"
+
+
+def sidecar_path_for(checkpoint_dir: str) -> str:
+    return os.path.join(str(checkpoint_dir), SIDECAR_NAME)
+
+
+def sidecar_is_pi05(meta: dict) -> bool:
+    fam = " ".join(str(meta.get(k) or "") for k in ("model_family", "config_name", "openpi_config")).lower()
+    return "pi05" in fam
+
+
+def yam_train_config_from_sidecar(sidecar_path: str, name: str):
+    """A TrainConfig for a YAM pi05 checkpoint from its deploy_metadata.json: the same transforms every
+    pi05_yam_* TrainConfig uses (YAMInputs/YAMOutputs, prompt_from_task) + the sidecar's asset_id and horizon.
+    Refuses anything that is not a pi05 checkpoint or lacks the keys."""
+    import openpi.transforms as T
+    from openpi.models import pi0_config
+    from openpi.policies import yam_policy
+    from openpi.training import config as C
+
+    with open(sidecar_path) as f:
+        meta = json.load(f)
+    if not sidecar_is_pi05(meta):
+        fam = {k: meta.get(k) for k in ("model_family", "config_name", "openpi_config")}
+        raise ValueError(f"{sidecar_path}: not a pi05 checkpoint ({fam})")
+    for k in ("asset_id", "action_horizon", "action_dim_padded"):
+        if not meta.get(k):
+            raise ValueError(f"{sidecar_path}: sidecar lacks {k!r}; cannot build the TrainConfig")
+    model = pi0_config.Pi0Config(
+        pi05=True, action_horizon=int(meta["action_horizon"]), action_dim=int(meta["action_dim_padded"])
+    )
+    data = C.SimpleDataConfig(
+        assets=C.AssetsConfig(asset_id=str(meta["asset_id"])),
+        data_transforms=lambda model: T.Group(
+            inputs=[yam_policy.YAMInputs(model_type=model.model_type)], outputs=[yam_policy.YAMOutputs()]
+        ),
+        base_config=C.DataConfig(prompt_from_task=True),
+    )
+    return C.TrainConfig(name=name, project_name="rfm_rl", model=model, data=data)
